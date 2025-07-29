@@ -1,38 +1,34 @@
-#!/usr/bin/env python3
-"""
-Flask wrapper for PromptNest Node.js application
-This serves as a bridge to run the Node.js app via Python/gunicorn on Render
-"""
 import os
 import subprocess
+import time
 import signal
 import sys
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response, jsonify
 import requests
-import time
 import threading
 
 app = Flask(__name__)
 
-# Node.js process
+# Global variables
 node_process = None
-NODE_PORT = 5001  # Use different port to avoid conflicts
+NODE_PORT = 3001
 
 def start_node_app():
-    """Start the Node.js application"""
+    """Start Node.js application"""
     global node_process
     try:
-        # Set environment variables
+        print("Starting Node.js application...")
+        
+        # Environment setup
         env = os.environ.copy()
         env['PORT'] = str(NODE_PORT)
         env['NODE_ENV'] = 'production'
         
-        # Start Node.js app
+        # Start the Node.js app
         node_process = subprocess.Popen(
-            ['npm', 'start'],
+            ['node', 'dist/index.js'],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            cwd=os.getcwd()
         )
         
         # Wait for Node.js to start
@@ -40,60 +36,58 @@ def start_node_app():
         print(f"Node.js app started on port {NODE_PORT}")
         
     except Exception as e:
-        print(f"Error starting Node.js app: {e}")
+        print(f"Error starting Node.js: {e}")
 
 def stop_node_app():
-    """Stop the Node.js application"""
+    """Stop Node.js application"""
     global node_process
     if node_process:
         node_process.terminate()
         node_process.wait()
 
-# Start Node.js app in background thread
-threading.Thread(target=start_node_app, daemon=True).start()
+# Start Node.js in background thread
+startup_thread = threading.Thread(target=start_node_app)
+startup_thread.daemon = True
+startup_thread.start()
+
+@app.route('/health')
+def health():
+    """Health check"""
+    try:
+        resp = requests.get(f'http://localhost:{NODE_PORT}/api/stats', timeout=5)
+        return jsonify({"status": "healthy", "code": resp.status_code})
+    except:
+        return jsonify({"status": "starting"}), 503
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def proxy(path):
-    """Proxy all requests to the Node.js application"""
+    """Proxy to Node.js app"""
     try:
-        # Forward request to Node.js app
         url = f'http://localhost:{NODE_PORT}/{path}'
         
         if request.method == 'GET':
             resp = requests.get(url, params=request.args)
         elif request.method == 'POST':
-            resp = requests.post(url, json=request.json, params=request.args)
+            resp = requests.post(url, json=request.get_json(), params=request.args)
         else:
-            resp = requests.request(request.method, url, json=request.json, params=request.args)
+            resp = requests.request(request.method, url, json=request.get_json())
         
-        return resp.content, resp.status_code, dict(resp.headers)
+        return Response(resp.content, resp.status_code, dict(resp.headers))
     
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Node.js application not ready"}), 503
+    except requests.ConnectionError:
+        return jsonify({"error": "Node.js app starting"}), 503
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    try:
-        resp = requests.get(f'http://localhost:{NODE_PORT}/api/stats', timeout=5)
-        if resp.status_code == 200:
-            return jsonify({"status": "healthy", "node_app": "running"})
-    except:
-        pass
-    
-    return jsonify({"status": "unhealthy", "node_app": "down"}), 503
-
-# Cleanup on exit
-def signal_handler(sig, frame):
+# Cleanup handler
+def cleanup(signum, frame):
     stop_node_app()
     sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGTERM, cleanup)
+signal.signal(signal.SIGINT, cleanup)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
