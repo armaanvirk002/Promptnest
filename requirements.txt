@@ -1,2 +1,0 @@
-# Empty requirements.txt to satisfy Render's Python detection
-# Actual app is Node.js - see package.json for real dependencies
