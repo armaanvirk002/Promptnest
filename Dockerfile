@@ -4,37 +4,43 @@ FROM node:20-alpine
 # Set working directory
 WORKDIR /app
 
-# Install build dependencies
-RUN apk add --no-cache python3 make g++
+# Install system dependencies needed for native modules
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    git
 
-# Copy package files first for better caching
+# Copy package files first for better Docker layer caching
 COPY package*.json ./
 
-# Install all dependencies (including dev dependencies for build)
-RUN npm install
+# Clean npm cache and install dependencies
+RUN npm cache clean --force
+RUN npm install --frozen-lockfile
 
-# Copy source code
+# Copy all source code
 COPY . .
 
-# Build the application
+# Set NODE_ENV for build
+ENV NODE_ENV=production
+
+# Build the application with verbose logging
 RUN npm run build
 
-# Remove dev dependencies to reduce image size
-RUN npm prune --production
-
 # Create non-root user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nextjs -u 1001
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001 -G nodejs
 
-# Change ownership of the app directory
+# Change ownership and switch to non-root user
 RUN chown -R nextjs:nodejs /app
 USER nextjs
 
-# Expose port
+# Expose the port
 EXPOSE 5000
 
-# Set environment to production
-ENV NODE_ENV=production
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:5000/api/stats', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
 # Start the application
 CMD ["node", "dist/index.js"]
